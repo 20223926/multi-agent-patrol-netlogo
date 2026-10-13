@@ -1,0 +1,221 @@
+<code><![CDATA[
+
+breed [ patrouilleurs patrouilleur ]
+
+patches-own [
+  idleness             ; temps depuis la dernière visite (cellules libres)
+  pheromone            ; EVAP uniquement
+  propagated           ; CLInG : valeur courante / précédente pour la mise à jour synchrone
+  propagated-prev
+  obstacle?
+]
+
+globals [
+  IGI   ; idleness moyenne sur les cellules libres
+  IWI   ; idleness max
+]
+
+to setup
+  clear-all
+
+  ifelse map-mode = "Rooms" [
+    import-pcolors "map1.png"
+  ] [
+    ifelse map-mode = "Spiral" [
+      import-pcolors "map2.png"
+    ] [
+      ifelse map-mode = "Custom" [
+        let path user-file
+        ifelse is-string? path [
+          import-pcolors path
+        ] [
+          user-message "Aucun fichier choisi : carte blanche."
+          ask patches [ set pcolor white ]
+        ]
+      ] [
+        ask patches [ set pcolor white ]
+        if map-mode != "Blank" [
+          creer-map-random
+        ]
+      ]
+    ]
+  ]
+
+  ask patches [
+    set obstacle? (pcolor != white)
+    set idleness 0
+    set pheromone 0
+    set propagated 0
+    set propagated-prev 0
+  ]
+
+  create-patrouilleurs nb-agents [
+    set color blue
+    set size 1
+    set shape "circle"
+    ifelse map-mode = "Rooms" [
+      move-to patch max-pxcor min-pycor
+    ] [
+      move-to one-of patches with [ not obstacle? ]
+    ]
+    set heading (random 4) * 90
+  ]
+
+  reset-ticks
+end
+
+to creer-map-random
+  ; Obstacles aléatoires
+  ask patches [
+    set obstacle? false
+    set pcolor white
+    if random 100 < random-obstacle-density [
+      set obstacle? true
+      set pcolor orange
+    ]
+  ]
+
+; Retire une cellule obstacle si ses 4 voisins sont libres (îlot 1×1)
+  ask patches with [ obstacle? ] [
+    if count neighbors4 with [ not obstacle? ] = 4 [
+      set obstacle? false
+      set pcolor white
+    ]
+  ]
+end
+
+to go
+  ifelse algo-mode = "EVAP" [
+    go-EVAP
+  ] [
+    go-CLING
+  ]
+  maj-metriques
+  ask patches with [ not obstacle? ] [
+    ; Gradient de noir à blanc en fonction de l'idleness (noir = élevée)
+    set pcolor scale-color black idleness IWI 0
+  ]
+  tick
+end
+
+to go-EVAP
+  ; Idleness + évaporation des phéromones, puis déplacement et dépôt qmax sur la case visitée
+  ask patches with [ not obstacle? ] [
+    set idleness idleness + 1
+    if pheromone > 0 [
+      set pheromone pheromone * (1 - rho)
+    ]
+  ]
+
+  ask patrouilleurs [ deplacer-EVAP ]
+end
+
+to go-CLING
+  ; Mise à jour du champ propagé (alpha, beta, op-min) puis agents vers le max local
+  ask patches with [ not obstacle? ] [
+    set idleness idleness + 1
+  ]
+
+  ask patches [
+    set propagated-prev propagated   ; sauvegarde des valeurs des voisins pour ce tick
+  ]
+
+  ask patches with [ not obstacle? ] [
+    let voisins-ok neighbors4 with [ not obstacle? ]
+    let max-f -1.0e100
+
+    foreach sort voisins-ok [ v ->
+      let op-j [ propagated-prev ] of v
+      let inter 0
+      if any? patrouilleurs-on v [ set inter beta ]
+      let val op-j - alpha - inter
+
+      let f-val 0
+      ifelse val >= op-min [
+        set f-val val
+      ] [
+        ifelse op-j > op-min [
+          set f-val op-min
+        ] [
+          set f-val op-j - 1
+        ]
+      ]
+      if f-val > max-f [ set max-f f-val ]
+    ]
+
+    let new-op max (list idleness max-f)
+    set propagated new-op
+  ]
+
+  ask patrouilleurs [ deplacer-CLING ]
+end
+
+to maj-metriques
+  let cases-libres patches with [ not obstacle? ]
+  if any? cases-libres [
+    set IGI mean [ idleness ] of cases-libres
+    set IWI max  [ idleness ] of cases-libres
+  ]
+end
+
+to deplacer-EVAP
+  ; Voisin à phéromone minimale
+  let voisins neighbors4 with [ not obstacle? and not any? patrouilleurs-here ]
+
+  if any? voisins [
+    let phero-min min [ pheromone ] of voisins
+    let candidats voisins with [ pheromone = phero-min ]
+
+    let prochaine-case patch-ahead 1
+    if not ((member? prochaine-case candidats) and
+            (random-float 1 < proba-continuer)) [  ; Proba-continuer favorise de maintenir la direction si elle est candidate
+      set prochaine-case one-of candidats
+    ]
+
+    face prochaine-case
+    move-to prochaine-case
+    ask patch-here [
+      set pheromone qmax
+      set idleness 0
+    ]
+  ]
+end
+
+to deplacer-CLING
+  ; Choisit un voisin libre au hasard parmi ceux de propagated maximal
+  let voisins neighbors4 with [ not obstacle? and not any? patrouilleurs-here ]
+  if any? voisins [
+    let max-op max [ propagated ] of voisins
+    let candidats voisins with [ propagated = max-op ]
+    let destination one-of candidats
+    move-to destination
+    ask patch-here [ set idleness 0 ]
+  ]
+end
+
+to draw-obstacle
+  ask patch round mouse-xcor round mouse-ycor [
+    let og_xcor round mouse-xcor
+    let og_ycor round mouse-ycor
+    if mouse-down? [
+      set obstacle? true
+      set pcolor orange
+      while [ mouse-down? and round mouse-xcor = og_xcor and round mouse-ycor = og_ycor ] []
+    ]
+  ]
+end
+
+to erase-obstacle
+  ask patch round mouse-xcor round mouse-ycor [
+    let og_xcor round mouse-xcor
+    let og_ycor round mouse-ycor
+    if mouse-down? [
+      set obstacle? false
+      set pcolor white
+      while [ mouse-down? and round mouse-xcor = og_xcor and round mouse-ycor = og_ycor ] []
+    ]
+  ]
+
+end
+
+]]></code>
